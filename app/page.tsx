@@ -1,7 +1,15 @@
 "use client";
 
 import { Html5QrcodeScanner } from "html5-qrcode";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { createClient } from "@/utils/supabase";
 
@@ -11,6 +19,8 @@ type BrandReport = {
   summary: string;
   better_swaps: string[];
 };
+
+type ChatMessage = { role: "user" | "assistant"; content: string };
 
 const USER_VALUES = [
   "Animal Welfare",
@@ -171,6 +181,99 @@ function ScannerModal({
   );
 }
 
+function BrandChatPanel({
+  chatInput,
+  onChatInputChange,
+  chatHistory,
+  isChatLoading,
+  onSend,
+  onInputKeyDown,
+}: {
+  chatInput: string;
+  onChatInputChange: (value: string) => void;
+  chatHistory: ChatMessage[];
+  isChatLoading: boolean;
+  onSend: () => void;
+  onInputKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [chatHistory, isChatLoading]);
+
+  return (
+    <div className="mt-6 rounded-3xl border border-white/50 bg-white/45 p-4 shadow-inner backdrop-blur-md sm:p-5">
+      <p className="text-sm font-semibold text-zinc-800">Ask about this brand</p>
+      <p className="mt-1 text-xs text-zinc-500">
+        Context uses your current report scores and summary.
+      </p>
+
+      <div
+        ref={scrollRef}
+        className="mt-4 max-h-56 space-y-3 overflow-y-auto rounded-2xl border border-white/60 bg-white/35 px-3 py-3 sm:max-h-64"
+      >
+        {chatHistory.length === 0 ? (
+          <p className="text-center text-sm text-zinc-500">
+            Ask a follow-up about ethics, sourcing, or alternatives.
+          </p>
+        ) : (
+          chatHistory.map((msg, index) => (
+            <div
+              key={`${msg.role}-${index}-${msg.content.slice(0, 24)}`}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`max-w-[92%] rounded-2xl px-3 py-2 text-sm leading-relaxed shadow-sm ${
+                  msg.role === "user"
+                    ? "bg-zinc-900 text-white"
+                    : "border border-white/70 bg-white/80 text-zinc-800"
+                }`}
+              >
+                {msg.content}
+              </div>
+            </div>
+          ))
+        )}
+        {isChatLoading && (
+          <div className="flex justify-start">
+            <div className="rounded-2xl border border-white/70 bg-white/80 px-3 py-2 text-sm text-zinc-500">
+              Thinking
+              <span className="inline-flex">
+                <span className="animate-bounce [animation-delay:-0.3s]">.</span>
+                <span className="animate-bounce [animation-delay:-0.15s]">.</span>
+                <span className="animate-bounce">.</span>
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
+        <textarea
+          value={chatInput}
+          onChange={(e) => onChatInputChange(e.target.value)}
+          onKeyDown={onInputKeyDown}
+          placeholder="Type a question…"
+          rows={2}
+          disabled={isChatLoading}
+          className="min-h-[44px] flex-1 resize-none rounded-2xl border border-white/70 bg-white/70 px-3 py-2.5 text-sm text-zinc-900 shadow-sm outline-none ring-zinc-400/30 placeholder:text-zinc-400 focus:border-zinc-300 focus:ring-2 disabled:opacity-60"
+        />
+        <button
+          type="button"
+          onClick={() => void onSend()}
+          disabled={isChatLoading || !chatInput.trim()}
+          className="shrink-0 rounded-2xl bg-zinc-900 px-5 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const supabase = useMemo(() => createClient(), []);
 
@@ -199,6 +302,9 @@ export default function Home() {
   });
   const [toastMessage, setToastMessage] = useState("");
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [isChatLoading, setIsChatLoading] = useState(false);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -231,6 +337,8 @@ export default function Home() {
         setCompareReport(null);
         setCompareBrandSearched("");
         setIsComparing(false);
+        setChatHistory([]);
+        setChatInput("");
       }
 
       const userPreferences = (preferences ?? selectedValues)
@@ -298,6 +406,82 @@ export default function Home() {
     },
     [pushRecentSearch, selectedValues, supabase.functions],
   );
+
+  const handleChat = useCallback(async () => {
+    const trimmed = chatInput.trim();
+    if (!trimmed || !report || isChatLoading) return;
+
+    setIsChatLoading(true);
+    setChatHistory((prev) => [...prev, { role: "user", content: trimmed }]);
+    setChatInput("");
+
+    try {
+      const { data, error } = await supabase.functions.invoke("moral-chat", {
+        body: {
+          message: trimmed,
+          brandContext: JSON.stringify(report),
+        },
+      });
+
+      if (error) {
+        setChatHistory((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: error.message || "Something went wrong. Try again.",
+          },
+        ]);
+        return;
+      }
+
+      const backendError =
+        data &&
+        typeof data === "object" &&
+        "error" in data &&
+        typeof (data as { error?: unknown }).error === "string"
+          ? (data as { error: string }).error
+          : "";
+      if (backendError) {
+        setChatHistory((prev) => [
+          ...prev,
+          { role: "assistant", content: backendError },
+        ]);
+        return;
+      }
+
+      const reply =
+        data &&
+        typeof data === "object" &&
+        "reply" in data &&
+        typeof (data as { reply?: unknown }).reply === "string"
+          ? (data as { reply: string }).reply
+          : "";
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: reply.trim() || "No response returned.",
+        },
+      ]);
+    } catch {
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Something went wrong. Try again.",
+        },
+      ]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  }, [chatInput, report, isChatLoading, supabase.functions]);
+
+  function handleChatKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleChat();
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -580,6 +764,15 @@ export default function Home() {
                   )}
                 </div>
               </div>
+
+              <BrandChatPanel
+                chatInput={chatInput}
+                onChatInputChange={setChatInput}
+                chatHistory={chatHistory}
+                isChatLoading={isChatLoading}
+                onSend={handleChat}
+                onInputKeyDown={handleChatKeyDown}
+              />
             </article>
 
             <article className="rounded-3xl border border-white/50 bg-white/55 p-4 shadow-[0_14px_36px_rgba(15,23,42,0.06)] backdrop-blur-xl sm:p-5">
@@ -634,6 +827,15 @@ export default function Home() {
                 <ProgressCircle label="Ethics Score" value={report.ethics_score} />
                 <ProgressCircle label="Health Score" value={report.health_score} />
               </div>
+
+              <BrandChatPanel
+                chatInput={chatInput}
+                onChatInputChange={setChatInput}
+                chatHistory={chatHistory}
+                isChatLoading={isChatLoading}
+                onSend={handleChat}
+                onInputKeyDown={handleChatKeyDown}
+              />
             </article>
 
             <article
